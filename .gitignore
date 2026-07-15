@@ -6,6 +6,9 @@ dist/
 .env
 .env.local
 server/.env
+env/production.*.env
 .DS_Store
 prisma/*.db
 prisma/*.db-journal
+.vercel
+.env*

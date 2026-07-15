@@ -9,6 +9,7 @@ import { OAuthButtons } from "@/components/OAuthButtons";
 export default function RegisterPage() {
   const router = useRouter();
   const [name, setName] = useState("");
+  const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -22,7 +23,7 @@ export default function RegisterPage() {
     const res = await fetch("/api/register", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, email, password }),
+      body: JSON.stringify({ name, username, email, password }),
     });
     const data = await res.json();
     if (!res.ok) {
@@ -60,6 +61,17 @@ export default function RegisterPage() {
         </div>
 
         <form onSubmit={onSubmit} className="space-y-4">
+          <input
+            className="field"
+            type="text"
+            placeholder="username (letters, numbers, _)"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            required
+            minLength={3}
+            maxLength={20}
+            pattern="[a-zA-Z0-9_]+"
+          />
           <input
             className="field"
             type="text"

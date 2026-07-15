@@ -3,6 +3,7 @@ import { z } from "zod";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { randomPastel } from "@/lib/colors";
+import { displayName as userDisplayName } from "@/lib/display";
 
 type Params = { params: Promise<{ code: string }> };
 
@@ -65,8 +66,11 @@ export async function POST(req: Request, { params }: Params) {
   const color = parsed.success && parsed.data.color ? parsed.data.color : randomPastel();
   const displayName =
     (parsed.success && parsed.data.displayName) ||
-    session.user.name ||
-    "booper";
+    userDisplayName({
+      username: session.user.username,
+      name: session.user.name,
+      email: session.user.email,
+    });
 
   const member = await prisma.roomMember.upsert({
     where: {

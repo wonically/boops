@@ -3,6 +3,7 @@ import { z } from "zod";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { makeRoomCode, randomPastel } from "@/lib/colors";
+import { displayName } from "@/lib/display";
 
 export async function GET() {
   const session = await auth();
@@ -19,7 +20,7 @@ export async function GET() {
       ],
     },
     include: {
-      host: { select: { id: true, name: true, email: true, image: true } },
+      host: { select: { id: true, name: true, username: true, email: true, image: true } },
       members: {
         where: { isOnline: true },
         select: {
@@ -66,6 +67,12 @@ export async function POST(req: Request) {
 
   const color = parsed.data.color || randomPastel();
 
+  const label = displayName({
+    username: session.user.username,
+    name: session.user.name,
+    email: session.user.email,
+  });
+
   const room = await prisma.room.create({
     data: {
       code,
@@ -75,14 +82,14 @@ export async function POST(req: Request) {
       members: {
         create: {
           userId: session.user.id,
-          displayName: session.user.name || "host",
+          displayName: label,
           color,
           isOnline: false,
         },
       },
     },
     include: {
-      host: { select: { id: true, name: true } },
+      host: { select: { id: true, name: true, username: true } },
       members: true,
     },
   });

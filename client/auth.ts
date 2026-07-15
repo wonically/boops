@@ -38,6 +38,7 @@ const providers: Provider[] = [
         name: user.name,
         email: user.email,
         image: user.image,
+        username: user.username,
       };
     },
   }),
@@ -67,4 +68,35 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   ...authConfig,
   adapter: PrismaAdapter(prisma),
   providers,
+  callbacks: {
+    ...authConfig.callbacks,
+    async jwt({ token, user, account }) {
+      if (user?.id) {
+        token.id = user.id as string;
+      }
+      if (account && user) {
+        token.id = user.id as string;
+      }
+
+      if (token.id && (user || token.username === undefined)) {
+        const dbUser = await prisma.user.findUnique({
+          where: { id: token.id as string },
+          select: { username: true, name: true },
+        });
+        if (dbUser) {
+          token.username = dbUser.username;
+          if (dbUser.name) token.name = dbUser.name;
+        }
+      }
+
+      return token;
+    },
+    async session({ session, token }) {
+      if (session.user && token.id) {
+        session.user.id = token.id as string;
+        session.user.username = (token.username as string | null | undefined) ?? null;
+      }
+      return session;
+    },
+  },
 });

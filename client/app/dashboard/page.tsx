@@ -4,6 +4,9 @@ import { FormEvent, useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { signOut, useSession } from "next-auth/react";
 import { PASTEL_COLORS } from "@/lib/colors";
+import { displayName } from "@/lib/display";
+import { FriendsPanel } from "@/components/FriendsPanel";
+import { UsernameSetup } from "@/components/UsernameSetup";
 
 type RoomRow = {
   id: string;
@@ -11,13 +14,13 @@ type RoomRow = {
   name: string;
   isPublic: boolean;
   hostId: string;
-  host: { id: string; name: string | null };
+  host: { id: string; name: string | null; username?: string | null };
   members: { id: string; displayName: string; color: string; isOnline: boolean }[];
   _count: { members: number };
 };
 
 export default function DashboardPage() {
-  const { data: session, status } = useSession();
+  const { data: session, status, update } = useSession();
   const router = useRouter();
   const [rooms, setRooms] = useState<RoomRow[]>([]);
   const [roomName, setRoomName] = useState("");
@@ -25,6 +28,24 @@ export default function DashboardPage() {
   const [color, setColor] = useState(PASTEL_COLORS[0]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [username, setUsername] = useState<string | null | undefined>(undefined);
+
+  const myLabel = displayName({
+    username: username ?? session?.user?.username,
+    name: session?.user?.name,
+    email: session?.user?.email,
+  });
+
+  const loadProfile = useCallback(async () => {
+    const res = await fetch("/api/users/me");
+    if (res.status === 401) {
+      router.push("/login");
+      return;
+    }
+    if (!res.ok) return;
+    const data = await res.json();
+    setUsername(data.user?.username ?? null);
+  }, [router]);
 
   const loadRooms = useCallback(async () => {
     const res = await fetch("/api/rooms");
@@ -43,9 +64,15 @@ export default function DashboardPage() {
   useEffect(() => {
     if (status === "authenticated") {
       setColor(PASTEL_COLORS[Math.floor(Math.random() * PASTEL_COLORS.length)]);
+      loadProfile();
       loadRooms();
     }
-  }, [status, loadRooms]);
+  }, [status, loadProfile, loadRooms]);
+
+  const onUsernameSaved = async () => {
+    await loadProfile();
+    await update();
+  };
 
   const createRoom = async (e: FormEvent) => {
     e.preventDefault();
@@ -64,7 +91,7 @@ export default function DashboardPage() {
       return;
     }
     router.push(
-      `/room/${data.room.code}?name=${encodeURIComponent(session?.user?.name || "host")}&color=${encodeURIComponent(color)}&userId=${encodeURIComponent(session!.user!.id)}`
+      `/room/${data.room.code}?name=${encodeURIComponent(myLabel)}&color=${encodeURIComponent(color)}&userId=${encodeURIComponent(session!.user!.id)}`
     );
   };
 
@@ -79,7 +106,7 @@ export default function DashboardPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         color,
-        displayName: session?.user?.name || "booper",
+        displayName: myLabel,
       }),
     });
     const data = await res.json();
@@ -95,7 +122,7 @@ export default function DashboardPage() {
 
   const enterRoom = (room: RoomRow) => {
     router.push(
-      `/room/${room.code}?name=${encodeURIComponent(session?.user?.name || "booper")}&color=${encodeURIComponent(color)}&userId=${encodeURIComponent(session!.user!.id)}`
+      `/room/${room.code}?name=${encodeURIComponent(myLabel)}&color=${encodeURIComponent(color)}&userId=${encodeURIComponent(session!.user!.id)}`
     );
   };
 
@@ -105,13 +132,15 @@ export default function DashboardPage() {
     loadRooms();
   };
 
-  if (status === "loading") {
+  if (status === "loading" || username === undefined) {
     return (
       <main className="page-shell">
         <p className="brand-subtitle">loading…</p>
       </main>
     );
   }
+
+  const hasUsername = !!username;
 
   return (
     <main className="page-shell" style={{ alignItems: "flex-start", paddingTop: "4.5rem" }}>
@@ -123,12 +152,32 @@ export default function DashboardPage() {
               Boops!
             </h1>
             <p className="brand-subtitle" style={{ textAlign: "left", marginBottom: 0 }}>
-              hey {session?.user?.name || "booper"} · manage rooms &amp; who&apos;s online
+              hey {myLabel}
+              {hasUsername && (
+                <>
+                  {" "}
+                  · <span style={{ color: "var(--text)", fontWeight: 600 }}>@{username}</span>
+                </>
+              )}
             </p>
           </div>
-          <button type="button" className="chip" onClick={() => signOut({ callbackUrl: "/" })}>
-            log out
-          </button>
+          <div className="flex gap-2">
+            <button type="button" className="chip" onClick={() => router.push("/profile")}>
+              profile
+            </button>
+            <button type="button" className="chip" onClick={() => signOut({ callbackUrl: "/" })}>
+              log out
+            </button>
+          </div>
+        </div>
+
+        {!hasUsername && <UsernameSetup onSaved={onUsernameSaved} />}
+
+        <div className="mb-8">
+          <div className="divider" style={{ marginBottom: "1rem" }}>
+            friends
+          </div>
+          <FriendsPanel enabled={hasUsername} />
         </div>
 
         <div className="mb-6">
@@ -192,6 +241,7 @@ export default function DashboardPage() {
           )}
           {rooms.map((room) => {
             const online = room.members.filter((m) => m.isOnline);
+            const hostLabel = displayName(room.host);
             return (
               <div
                 key={room.id}
@@ -206,7 +256,7 @@ export default function DashboardPage() {
                     <p style={{ margin: 0, fontWeight: 700, color: "var(--text)" }}>{room.name}</p>
                     <p className="label" style={{ marginBottom: 0 }}>
                       code <strong style={{ color: "var(--text)" }}>{room.code}</strong>
-                      {" · "}host {room.host.name || "unknown"}
+                      {" · "}host {hostLabel}
                       {" · "}
                       {online.length} online / {room._count.members} members
                     </p>

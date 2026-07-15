@@ -60,6 +60,7 @@ export const authConfig = {
     async session({ session, token }) {
       if (session.user && token.id) {
         session.user.id = token.id as string;
+        session.user.username = (token.username as string | null | undefined) ?? null;
       }
       return session;
     },
@@ -67,7 +68,7 @@ export const authConfig = {
       const { pathname } = request.nextUrl;
       const isLoggedIn = !!auth?.user;
 
-      const protectedPaths = ["/dashboard", "/room"];
+      const protectedPaths = ["/dashboard", "/room", "/profile"];
       const needsAuth = protectedPaths.some((p) => pathname.startsWith(p));
 
       if (needsAuth) return isLoggedIn;

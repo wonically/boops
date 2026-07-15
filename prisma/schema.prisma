@@ -20,6 +20,7 @@ datasource db {
 
 model User {
   id            String    @id @default(cuid())
+  username      String?   @unique
   name          String?
   email         String?   @unique
   emailVerified DateTime?
@@ -28,10 +29,12 @@ model User {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
-  accounts     Account[]
-  sessions     Session[]
-  hostedRooms  Room[]         @relation("RoomHost")
-  memberships  RoomMember[]
+  accounts          Account[]
+  sessions          Session[]
+  hostedRooms       Room[]         @relation("RoomHost")
+  memberships       RoomMember[]
+  sentFriendships     Friendship[] @relation("FriendshipRequester")
+  receivedFriendships Friendship[] @relation("FriendshipAddressee")
 }
 
 model Account {
@@ -99,4 +102,25 @@ model RoomMember {
 
   @@unique([roomId, userId])
   @@index([roomId, isOnline])
+}
+
+enum FriendshipStatus {
+  PENDING
+  ACCEPTED
+}
+
+model Friendship {
+  id          String           @id @default(cuid())
+  requesterId String
+  addresseeId String
+  status      FriendshipStatus @default(PENDING)
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  requester User @relation("FriendshipRequester", fields: [requesterId], references: [id], onDelete: Cascade)
+  addressee User @relation("FriendshipAddressee", fields: [addresseeId], references: [id], onDelete: Cascade)
+
+  @@unique([requesterId, addresseeId])
+  @@index([addresseeId, status])
+  @@index([requesterId, status])
 }
