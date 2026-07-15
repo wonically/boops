@@ -42,7 +42,8 @@ if (process.env.AUTH_GITHUB_ID && process.env.AUTH_GITHUB_SECRET) {
 export const authConfig = {
   session: { strategy: "jwt" },
   trustHost: true,
-  secret: process.env.AUTH_SECRET,
+  // Omit secret here — middleware bundles config at build time and would
+  // inline undefined. Auth.js reads AUTH_SECRET from the runtime env instead.
   pages: {
     signIn: "/login",
   },
