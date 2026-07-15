@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useParams, useSearchParams } from "next/navigation";
 import { io, Socket } from "socket.io-client";
+import { useTheme } from "@/lib/theme";
 
 const SERVER_URL = process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:3001";
 const SPATIAL_RADIUS = 300;
@@ -25,9 +26,11 @@ interface Player {
 export default function RoomPage() {
   const params = useParams();
   const searchParams = useSearchParams();
+  const { theme } = useTheme();
   const roomId = params.roomId as string;
   const name = searchParams.get("name") || "anon";
-  const color = searchParams.get("color") || "#4ECDC4";
+  const color = searchParams.get("color") || "#B8D4F8";
+  const userId = searchParams.get("userId") || undefined;
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const socketRef = useRef<Socket | null>(null);
@@ -39,9 +42,48 @@ export default function RoomPage() {
   const gainNodesRef = useRef<Map<string, GainNode>>(new Map());
   const streamRef = useRef<MediaStream | null>(null);
   const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
+  const themeRef = useRef(theme);
   const [muted, setMuted] = useState(false);
   const [connected, setConnected] = useState(false);
   const [playerCount, setPlayerCount] = useState(0);
+  const [memberList, setMemberList] = useState<
+    { displayName: string; color: string; isOnline: boolean; userId: string }[]
+  >([]);
+
+  useEffect(() => {
+    themeRef.current = theme;
+  }, [theme]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadMembers = async () => {
+      try {
+        const res = await fetch(`/api/rooms/${roomId}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled && data.room?.members) {
+          setMemberList(
+            data.room.members.map(
+              (m: { displayName: string; color: string; isOnline: boolean; userId: string }) => ({
+                displayName: m.displayName,
+                color: m.color,
+                isOnline: m.isOnline,
+                userId: m.userId,
+              })
+            )
+          );
+        }
+      } catch {
+        /* ignore */
+      }
+    };
+    loadMembers();
+    const id = setInterval(loadMembers, 4000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [roomId]);
 
   const getDistance = (x1: number, y1: number, x2: number, y2: number) =>
     Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
@@ -63,7 +105,12 @@ export default function RoomPage() {
 
     socket.on("connect", () => {
       setConnected(true);
-      socket.emit("join-room", { roomId, name, color });
+      socket.emit("join-room", { roomId, name, color, userId });
+    });
+
+    socket.on("join-error", ({ error }: { error: string }) => {
+      alert(error);
+      window.location.href = "/dashboard";
     });
 
     socket.on("room-state", (players: Player[]) => {
@@ -125,7 +172,7 @@ export default function RoomPage() {
       for (const pc of peersRef.current.values()) pc.close();
       if (audioContextRef.current) audioContextRef.current.close();
     };
-  }, [roomId, name, color]);
+  }, [roomId, name, color, userId]);
 
   async function initAudio() {
     try {
@@ -234,10 +281,25 @@ export default function RoomPage() {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d")!;
+    const isDark = themeRef.current === "dark";
     ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
 
+    // Soft pastel wash
+    const wash = ctx.createLinearGradient(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+    if (isDark) {
+      wash.addColorStop(0, "rgba(90, 58, 85, 0.35)");
+      wash.addColorStop(0.5, "rgba(47, 69, 96, 0.3)");
+      wash.addColorStop(1, "rgba(47, 74, 66, 0.35)");
+    } else {
+      wash.addColorStop(0, "rgba(255, 214, 231, 0.45)");
+      wash.addColorStop(0.5, "rgba(201, 231, 255, 0.4)");
+      wash.addColorStop(1, "rgba(212, 245, 229, 0.45)");
+    }
+    ctx.fillStyle = wash;
+    ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
     // Grid
-    ctx.strokeStyle = "rgba(255,255,255,0.03)";
+    ctx.strokeStyle = isDark ? "rgba(243, 238, 248, 0.06)" : "rgba(61, 53, 80, 0.08)";
     for (let x = 0; x < CANVAS_WIDTH; x += 40) {
       ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, CANVAS_HEIGHT); ctx.stroke();
     }
@@ -249,25 +311,27 @@ export default function RoomPage() {
     const myPos = myPosRef.current;
     ctx.beginPath();
     ctx.arc(myPos.x, myPos.y, SPATIAL_RADIUS, 0, Math.PI * 2);
-    ctx.strokeStyle = "rgba(255,255,255,0.05)";
+    ctx.strokeStyle = isDark ? "rgba(184, 212, 248, 0.2)" : "rgba(245, 163, 192, 0.35)";
+    ctx.setLineDash([8, 8]);
     ctx.stroke();
+    ctx.setLineDash([]);
 
     // Draw other players
     for (const player of playersRef.current.values()) {
-      drawPlayer(ctx, player);
+      drawPlayer(ctx, player, isDark);
     }
 
     // Draw self
-    drawPlayer(ctx, { id: "self", name, x: myPos.x, y: myPos.y, color, auraIntensity: 0 });
+    drawPlayer(ctx, { id: "self", name, x: myPos.x, y: myPos.y, color, auraIntensity: 0 }, isDark);
   }
 
-  function drawPlayer(ctx: CanvasRenderingContext2D, player: Player) {
+  function drawPlayer(ctx: CanvasRenderingContext2D, player: Player, isDark: boolean) {
     const { x, y, color: pColor, name: pName, auraIntensity } = player;
 
     // Aura glow
     const glowRadius = AVATAR_RADIUS + 10 + auraIntensity * 30;
     const gradient = ctx.createRadialGradient(x, y, AVATAR_RADIUS, x, y, glowRadius);
-    gradient.addColorStop(0, pColor + "40");
+    gradient.addColorStop(0, pColor + "66");
     gradient.addColorStop(1, pColor + "00");
     ctx.beginPath();
     ctx.arc(x, y, glowRadius, 0, Math.PI * 2);
@@ -279,46 +343,84 @@ export default function RoomPage() {
     ctx.arc(x, y, AVATAR_RADIUS, 0, Math.PI * 2);
     ctx.fillStyle = pColor;
     ctx.fill();
-    ctx.strokeStyle = "rgba(255,255,255,0.3)";
-    ctx.lineWidth = 2;
+    ctx.strokeStyle = isDark ? "rgba(243, 238, 248, 0.45)" : "rgba(255, 255, 255, 0.85)";
+    ctx.lineWidth = 2.5;
     ctx.stroke();
 
     // Name
-    ctx.fillStyle = "#fff";
-    ctx.font = "12px sans-serif";
+    ctx.fillStyle = isDark ? "#f3eef8" : "#3d3550";
+    ctx.font = "600 12px system-ui, sans-serif";
     ctx.textAlign = "center";
     ctx.fillText(pName, x, y + AVATAR_RADIUS + 16);
   }
 
   return (
-    <div className="min-h-screen bg-gray-950 flex flex-col items-center justify-center p-4">
-      <div className="flex items-center gap-4 mb-4">
-        <div className={`w-3 h-3 rounded-full ${connected ? "bg-green-400" : "bg-red-400"}`} />
-        <span className="text-gray-400 text-sm">
-          room <span className="text-white font-mono font-bold">{roomId}</span> · {playerCount} online
+    <div className="room-shell">
+      <div className="page-blob" aria-hidden />
+      <div className="room-toolbar">
+        <div className={`w-3 h-3 rounded-full ${connected ? "bg-emerald-400" : "bg-rose-400"}`} />
+        <span>
+          room <strong>{roomId}</strong> · {playerCount} in world
         </span>
         <button
+          type="button"
           onClick={() => setMuted(!muted)}
-          className={`px-3 py-1 rounded text-sm ${muted ? "bg-red-600 text-white" : "bg-gray-700 text-gray-300"}`}
+          className={`chip ${muted ? "chip-danger" : ""}`}
         >
           {muted ? "unmute" : "mute"}
         </button>
         <button
+          type="button"
           onClick={() => navigator.clipboard.writeText(window.location.href)}
-          className="px-3 py-1 rounded text-sm bg-gray-700 text-gray-300 hover:bg-gray-600"
+          className="chip"
         >
           copy link
         </button>
+        <a href="/dashboard" className="chip">
+          dashboard
+        </a>
       </div>
 
-      <canvas
-        ref={canvasRef}
-        width={CANVAS_WIDTH}
-        height={CANVAS_HEIGHT}
-        className="border border-gray-800 rounded-xl bg-gray-900/50"
-      />
+      <div className="flex flex-col lg:flex-row gap-4 items-center lg:items-start z-[1] w-full max-w-[1400px] justify-center">
+        <canvas
+          ref={canvasRef}
+          width={CANVAS_WIDTH}
+          height={CANVAS_HEIGHT}
+          className="room-canvas"
+        />
 
-      <p className="text-gray-500 text-sm mt-4">WASD or arrow keys to move · get closer to hear others</p>
+        <aside
+          className="glass-card"
+          style={{ maxWidth: "16rem", width: "100%", padding: "1rem" }}
+        >
+          <p className="label" style={{ marginBottom: "0.75rem" }}>
+            room members
+          </p>
+          <div className="space-y-2">
+            {memberList.length === 0 && (
+              <p className="brand-subtitle" style={{ margin: 0, fontSize: "0.85rem" }}>
+                no members yet
+              </p>
+            )}
+            {memberList.map((m) => (
+              <div key={m.userId} className="flex items-center gap-2">
+                <span
+                  className="w-3 h-3 rounded-full"
+                  style={{ background: m.color, opacity: m.isOnline ? 1 : 0.35 }}
+                />
+                <span style={{ color: "var(--text)", fontSize: "0.9rem" }}>
+                  {m.displayName}
+                </span>
+                <span style={{ color: "var(--text-soft)", fontSize: "0.75rem", marginLeft: "auto" }}>
+                  {m.isOnline ? "online" : "away"}
+                </span>
+              </div>
+            ))}
+          </div>
+        </aside>
+      </div>
+
+      <p className="room-hint">WASD or arrow keys to move · get closer to hear others</p>
     </div>
   );
 }

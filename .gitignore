@@ -5,4 +5,7 @@ server/node_modules/
 dist/
 .env
 .env.local
+server/.env
 .DS_Store
+prisma/*.db
+prisma/*.db-journal
