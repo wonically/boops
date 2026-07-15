@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, type PointerEvent as ReactPointerEvent } from "react";
 import { useParams, useSearchParams } from "next/navigation";
 import { io, Socket } from "socket.io-client";
 import { useTheme } from "@/lib/theme";
@@ -37,6 +37,8 @@ export default function RoomPage() {
   const playersRef = useRef<Map<string, Player>>(new Map());
   const myPosRef = useRef({ x: 400, y: 300 });
   const keysRef = useRef<Set<string>>(new Set());
+  const draggingRef = useRef(false);
+  const lastEmitRef = useRef(0);
   const animFrameRef = useRef<number>(0);
   const audioContextRef = useRef<AudioContext | null>(null);
   const gainNodesRef = useRef<Map<string, GainNode>>(new Map());
@@ -228,32 +230,100 @@ export default function RoomPage() {
     socketRef.current?.emit("rtc-answer", { to: from, answer });
   }
 
+  const emitMove = useCallback(
+    (force = false) => {
+      const now = Date.now();
+      if (!force && now - lastEmitRef.current < 50) return;
+      const pos = myPosRef.current;
+      socketRef.current?.emit("move", { x: pos.x, y: pos.y, roomId });
+      lastEmitRef.current = now;
+    },
+    [roomId]
+  );
+
+  const canvasPoint = useCallback((clientX: number, clientY: number) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = CANVAS_WIDTH / rect.width;
+    const scaleY = CANVAS_HEIGHT / rect.height;
+    return {
+      x: Math.max(AVATAR_RADIUS, Math.min(CANVAS_WIDTH - AVATAR_RADIUS, (clientX - rect.left) * scaleX)),
+      y: Math.max(AVATAR_RADIUS, Math.min(CANVAS_HEIGHT - AVATAR_RADIUS, (clientY - rect.top) * scaleY)),
+    };
+  }, []);
+
+  const onPointerDown = useCallback(
+    (e: ReactPointerEvent<HTMLCanvasElement>) => {
+      const point = canvasPoint(e.clientX, e.clientY);
+      if (!point) return;
+      draggingRef.current = true;
+      myPosRef.current = point;
+      emitMove(true);
+      e.currentTarget.setPointerCapture(e.pointerId);
+    },
+    [canvasPoint, emitMove]
+  );
+
+  const onPointerMove = useCallback(
+    (e: ReactPointerEvent<HTMLCanvasElement>) => {
+      if (!draggingRef.current) return;
+      const point = canvasPoint(e.clientX, e.clientY);
+      if (!point) return;
+      myPosRef.current = point;
+      emitMove();
+    },
+    [canvasPoint, emitMove]
+  );
+
+  const onPointerUp = useCallback((e: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (!draggingRef.current) return;
+    draggingRef.current = false;
+    emitMove(true);
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {
+      /* already released */
+    }
+  }, [emitMove]);
+
   // Game loop
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => keysRef.current.add(e.key.toLowerCase());
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      keysRef.current.add(e.key.toLowerCase());
+    };
     const handleKeyUp = (e: KeyboardEvent) => keysRef.current.delete(e.key.toLowerCase());
     window.addEventListener("keydown", handleKeyDown);
     window.addEventListener("keyup", handleKeyUp);
-
-    let lastEmit = 0;
 
     const gameLoop = () => {
       const keys = keysRef.current;
       const pos = myPosRef.current;
       let moved = false;
 
-      if (keys.has("w") || keys.has("arrowup")) { pos.y = Math.max(AVATAR_RADIUS, pos.y - MOVE_SPEED); moved = true; }
-      if (keys.has("s") || keys.has("arrowdown")) { pos.y = Math.min(CANVAS_HEIGHT - AVATAR_RADIUS, pos.y + MOVE_SPEED); moved = true; }
-      if (keys.has("a") || keys.has("arrowleft")) { pos.x = Math.max(AVATAR_RADIUS, pos.x - MOVE_SPEED); moved = true; }
-      if (keys.has("d") || keys.has("arrowright")) { pos.x = Math.min(CANVAS_WIDTH - AVATAR_RADIUS, pos.x + MOVE_SPEED); moved = true; }
-
-      if (moved) {
-        const now = Date.now();
-        if (now - lastEmit > 50) {
-          socketRef.current?.emit("move", { x: pos.x, y: pos.y, roomId });
-          lastEmit = now;
+      // Keyboard only when not dragging
+      if (!draggingRef.current) {
+        if (keys.has("w") || keys.has("arrowup")) {
+          pos.y = Math.max(AVATAR_RADIUS, pos.y - MOVE_SPEED);
+          moved = true;
+        }
+        if (keys.has("s") || keys.has("arrowdown")) {
+          pos.y = Math.min(CANVAS_HEIGHT - AVATAR_RADIUS, pos.y + MOVE_SPEED);
+          moved = true;
+        }
+        if (keys.has("a") || keys.has("arrowleft")) {
+          pos.x = Math.max(AVATAR_RADIUS, pos.x - MOVE_SPEED);
+          moved = true;
+        }
+        if (keys.has("d") || keys.has("arrowright")) {
+          pos.x = Math.min(CANVAS_WIDTH - AVATAR_RADIUS, pos.x + MOVE_SPEED);
+          moved = true;
         }
       }
+
+      if (moved) emitMove();
 
       // Lerp remote players
       for (const player of playersRef.current.values()) {
@@ -275,7 +345,7 @@ export default function RoomPage() {
       window.removeEventListener("keyup", handleKeyUp);
       cancelAnimationFrame(animFrameRef.current);
     };
-  }, [roomId, updateSpatialAudio]);
+  }, [emitMove, updateSpatialAudio]);
 
   function draw() {
     const canvas = canvasRef.current;
@@ -387,6 +457,11 @@ export default function RoomPage() {
           width={CANVAS_WIDTH}
           height={CANVAS_HEIGHT}
           className="room-canvas"
+          style={{ touchAction: "none", cursor: "grab" }}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerUp}
         />
 
         <aside
@@ -420,7 +495,7 @@ export default function RoomPage() {
         </aside>
       </div>
 
-      <p className="room-hint">WASD or arrow keys to move · get closer to hear others</p>
+      <p className="room-hint">drag on the world or use WASD · get closer to hear others</p>
     </div>
   );
 }

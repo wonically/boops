@@ -298,6 +298,12 @@ body {
   max-width: 100%;
   height: auto;
   z-index: 1;
+  touch-action: none;
+  cursor: grab;
+}
+
+.room-canvas:active {
+  cursor: grabbing;
 }
 
 .room-hint {
