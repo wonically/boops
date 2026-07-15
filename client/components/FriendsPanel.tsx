@@ -94,12 +94,26 @@ export function FriendsPanel({ enabled }: Props) {
 
   return (
     <div className="space-y-4">
-      <form onSubmit={sendRequest} className="flex gap-2">
+      <form onSubmit={sendRequest} className="flex gap-2" autoComplete="off">
+        {/* Hidden decoy fields so password managers skip the friend search input */}
+        <input type="text" name="username" autoComplete="username" tabIndex={-1} aria-hidden="true" style={{ display: "none" }} />
+        <input type="password" name="password" autoComplete="current-password" tabIndex={-1} aria-hidden="true" style={{ display: "none" }} />
         <input
           className="field flex-1"
-          placeholder="add friend by username"
+          type="search"
+          name="boops-friend-handle"
+          id="boops-friend-handle"
+          placeholder="add friend by @handle"
           value={username}
           onChange={(e) => setUsername(e.target.value)}
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
+          spellCheck={false}
+          data-1p-ignore="true"
+          data-lpignore="true"
+          data-form-type="other"
+          inputMode="search"
         />
         <button type="submit" className="btn-secondary" disabled={loading}>
           add

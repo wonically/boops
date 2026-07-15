@@ -45,9 +45,11 @@ export function UsernameSetup({ onSaved }: Props) {
       <p className="brand-subtitle" style={{ textAlign: "left", marginTop: 0 }}>
         friends can find you by username
       </p>
-      <form onSubmit={onSubmit} className="space-y-3">
+      <form onSubmit={onSubmit} className="space-y-3" autoComplete="off">
         <input
           className="field"
+          type="text"
+          name="boops-claim-username"
           placeholder="username (e.g. wony_nguyen)"
           value={username}
           onChange={(e) => setUsername(e.target.value)}
@@ -55,13 +57,22 @@ export function UsernameSetup({ onSaved }: Props) {
           minLength={3}
           maxLength={20}
           pattern="[a-zA-Z0-9_]+"
+          autoComplete="off"
+          data-1p-ignore="true"
+          data-lpignore="true"
+          data-form-type="other"
         />
         <input
           className="field"
+          type="text"
+          name="boops-display-name"
           placeholder="display name (optional)"
           value={name}
           onChange={(e) => setName(e.target.value)}
           maxLength={40}
+          autoComplete="nickname"
+          data-1p-ignore="true"
+          data-lpignore="true"
         />
         {error && <p className="text-sm text-rose-500">{error}</p>}
         <button type="submit" className="btn-primary" disabled={loading}>

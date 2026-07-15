@@ -150,11 +150,13 @@ export default function ProfilePage() {
           </div>
         </div>
 
-        <form onSubmit={onSave} className="space-y-4">
+        <form onSubmit={onSave} className="space-y-4" autoComplete="off">
           <div>
             <p className="label">username</p>
             <input
               className="field"
+              type="text"
+              name="boops-profile-username"
               placeholder="letters, numbers, _"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
@@ -162,21 +164,38 @@ export default function ProfilePage() {
               maxLength={20}
               pattern="[a-zA-Z0-9_]+"
               required
+              autoComplete="off"
+              data-1p-ignore="true"
+              data-lpignore="true"
+              data-form-type="other"
             />
           </div>
           <div>
             <p className="label">display name</p>
             <input
               className="field"
+              type="text"
+              name="boops-profile-displayname"
               placeholder="how you show up in rooms"
               value={name}
               onChange={(e) => setName(e.target.value)}
               maxLength={40}
+              autoComplete="nickname"
+              data-1p-ignore="true"
+              data-lpignore="true"
             />
           </div>
           <div>
             <p className="label">email</p>
-            <input className="field" value={user.email || ""} disabled readOnly />
+            <input
+              className="field"
+              type="email"
+              name="boops-profile-email"
+              value={user.email || ""}
+              disabled
+              readOnly
+              autoComplete="off"
+            />
           </div>
 
           {error && <p className="text-sm text-rose-500">{error}</p>}
