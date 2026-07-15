@@ -153,6 +153,9 @@ export default function ProfilePage() {
         <form onSubmit={onSave} className="space-y-4" autoComplete="off">
           <div>
             <p className="label">username</p>
+            <p className="brand-subtitle" style={{ textAlign: "left", marginTop: 0, marginBottom: "0.5rem" }}>
+              unique across all users
+            </p>
             <input
               className="field"
               type="text"
@@ -172,6 +175,9 @@ export default function ProfilePage() {
           </div>
           <div>
             <p className="label">display name</p>
+            <p className="brand-subtitle" style={{ textAlign: "left", marginTop: 0, marginBottom: "0.5rem" }}>
+              can be the same as other users
+            </p>
             <input
               className="field"
               type="text"
@@ -187,6 +193,9 @@ export default function ProfilePage() {
           </div>
           <div>
             <p className="label">email</p>
+            <p className="brand-subtitle" style={{ textAlign: "left", marginTop: 0, marginBottom: "0.5rem" }}>
+              unique across all users
+            </p>
             <input
               className="field"
               type="email"

@@ -42,6 +42,7 @@ interface Player {
   color: string;
   auraIntensity: number;
   roomId: string;
+  cameraOn: boolean;
 }
 
 const rooms = new Map<string, Map<string, Player>>();
@@ -115,6 +116,7 @@ io.on("connection", (socket) => {
         color,
         auraIntensity: 0,
         roomId: code,
+        cameraOn: false,
       };
 
       rooms.get(code)!.set(socket.id, player);
@@ -158,6 +160,20 @@ io.on("connection", (socket) => {
     player.auraIntensity = intensity;
     socket.to(code).emit("player-aura", { id: socket.id, intensity });
   });
+
+  socket.on(
+    "camera-state",
+    ({ roomId, cameraOn }: { roomId: string; cameraOn: boolean }) => {
+      const code = roomId.toLowerCase();
+      const room = rooms.get(code);
+      if (!room) return;
+      const player = room.get(socket.id);
+      if (!player) return;
+
+      player.cameraOn = !!cameraOn;
+      socket.to(code).emit("player-camera", { id: socket.id, cameraOn: player.cameraOn });
+    }
+  );
 
   socket.on("rtc-offer", ({ to, offer }: { to: string; offer: RTCSessionDescriptionInit }) => {
     socket.to(to).emit("rtc-offer", { from: socket.id, offer });

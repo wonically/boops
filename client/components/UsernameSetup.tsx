@@ -43,14 +43,14 @@ export function UsernameSetup({ onSaved }: Props) {
     >
       <p className="label">pick a username</p>
       <p className="brand-subtitle" style={{ textAlign: "left", marginTop: 0 }}>
-        friends can find you by username
+        username is unique · display name can be shared
       </p>
       <form onSubmit={onSubmit} className="space-y-3" autoComplete="off">
         <input
           className="field"
           type="text"
           name="boops-claim-username"
-          placeholder="username (e.g. wony_nguyen)"
+          placeholder="username (unique @handle)"
           value={username}
           onChange={(e) => setUsername(e.target.value)}
           required
@@ -66,7 +66,7 @@ export function UsernameSetup({ onSaved }: Props) {
           className="field"
           type="text"
           name="boops-display-name"
-          placeholder="display name (optional)"
+          placeholder="display name (not unique)"
           value={name}
           onChange={(e) => setName(e.target.value)}
           maxLength={40}

@@ -1,6 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback, type PointerEvent as ReactPointerEvent } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  useCallback,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { useParams, useSearchParams } from "next/navigation";
 import { io, Socket } from "socket.io-client";
 import { useTheme } from "@/lib/theme";
@@ -19,6 +25,7 @@ interface Player {
   y: number;
   color: string;
   auraIntensity: number;
+  cameraOn?: boolean;
   targetX?: number;
   targetY?: number;
 }
@@ -26,6 +33,14 @@ interface Player {
 type SpatialChain = {
   gain: GainNode;
   pan: StereoPannerNode;
+};
+
+type VideoBubble = {
+  id: string;
+  name: string;
+  color: string;
+  stream: MediaStream;
+  mirrored: boolean;
 };
 
 function distance(x1: number, y1: number, x2: number, y2: number) {
@@ -43,6 +58,44 @@ function proximityPan(myX: number, theirX: number) {
   return Math.max(-1, Math.min(1, (theirX - myX) / SPATIAL_RADIUS));
 }
 
+function VideoBubbleEl({
+  bubble,
+  videoRef,
+}: {
+  bubble: VideoBubble;
+  videoRef: (el: HTMLVideoElement | null) => void;
+}) {
+  const localRef = useRef<HTMLVideoElement | null>(null);
+
+  useEffect(() => {
+    const el = localRef.current;
+    if (!el) return;
+    el.srcObject = bubble.stream;
+    void el.play().catch(() => undefined);
+  }, [bubble.stream]);
+
+  return (
+    <div
+      className="video-bubble"
+      data-bubble-id={bubble.id}
+      style={{ borderColor: bubble.color, opacity: 0, transform: "translate(-50%, -120%) scale(0.5)" }}
+    >
+      <video
+        ref={(el) => {
+          localRef.current = el;
+          videoRef(el);
+        }}
+        className="video-bubble-media"
+        autoPlay
+        playsInline
+        muted={bubble.mirrored}
+        style={bubble.mirrored ? { transform: "scaleX(-1)" } : undefined}
+      />
+      <span className="video-bubble-name">{bubble.name}</span>
+    </div>
+  );
+}
+
 export default function RoomPage() {
   const params = useParams();
   const searchParams = useSearchParams();
@@ -53,6 +106,7 @@ export default function RoomPage() {
   const userId = searchParams.get("userId") || undefined;
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const worldRef = useRef<HTMLDivElement>(null);
   const socketRef = useRef<Socket | null>(null);
   const playersRef = useRef<Map<string, Player>>(new Map());
   const myPosRef = useRef({ x: 400, y: 300 });
@@ -63,13 +117,22 @@ export default function RoomPage() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const spatialRef = useRef<Map<string, SpatialChain>>(new Map());
   const streamRef = useRef<MediaStream | null>(null);
+  const localVideoTrackRef = useRef<MediaStreamTrack | null>(null);
+  const localPreviewStreamRef = useRef<MediaStream | null>(null);
   const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
+  const remoteVideoStreamsRef = useRef<Map<string, MediaStream>>(new Map());
   const mutedRef = useRef(false);
+  const cameraOnRef = useRef(false);
   const themeRef = useRef(theme);
+  const makingOfferRef = useRef<Map<string, boolean>>(new Map());
+
   const [muted, setMuted] = useState(false);
+  const [cameraOn, setCameraOn] = useState(false);
+  const [cameraError, setCameraError] = useState("");
   const [micReady, setMicReady] = useState(false);
   const [connected, setConnected] = useState(false);
   const [playerCount, setPlayerCount] = useState(0);
+  const [videoBubbles, setVideoBubbles] = useState<VideoBubble[]>([]);
   const [memberList, setMemberList] = useState<
     { displayName: string; color: string; isOnline: boolean; userId: string }[]
   >([]);
@@ -84,6 +147,10 @@ export default function RoomPage() {
       track.enabled = !muted;
     });
   }, [muted]);
+
+  useEffect(() => {
+    cameraOnRef.current = cameraOn;
+  }, [cameraOn]);
 
   useEffect(() => {
     let cancelled = false;
@@ -116,6 +183,48 @@ export default function RoomPage() {
     };
   }, [roomId]);
 
+  const syncVideoBubbles = useCallback(() => {
+    const next: VideoBubble[] = [];
+
+    if (cameraOnRef.current && localPreviewStreamRef.current) {
+      next.push({
+        id: "self",
+        name,
+        color,
+        stream: localPreviewStreamRef.current,
+        mirrored: true,
+      });
+    }
+
+    for (const [peerId, stream] of remoteVideoStreamsRef.current.entries()) {
+      const player = playersRef.current.get(peerId);
+      if (!player?.cameraOn) continue;
+      if (!stream.getVideoTracks().some((t) => t.readyState === "live" && t.enabled)) continue;
+      next.push({
+        id: peerId,
+        name: player.name,
+        color: player.color,
+        stream,
+        mirrored: false,
+      });
+    }
+
+    setVideoBubbles((prev) => {
+      if (
+        prev.length === next.length &&
+        prev.every(
+          (p, i) =>
+            p.id === next[i].id &&
+            p.stream.id === next[i].stream.id &&
+            p.name === next[i].name
+        )
+      ) {
+        return prev;
+      }
+      return next;
+    });
+  }, [name, color]);
+
   const updateSpatialAudio = useCallback(() => {
     const ctx = audioContextRef.current;
     if (!ctx) return;
@@ -137,6 +246,57 @@ export default function RoomPage() {
       chain.pan.pan.setTargetAtTime(pan, ctx.currentTime, 0.08);
       player.auraIntensity = volume;
     }
+  }, []);
+
+  const updateBubblePositions = useCallback(() => {
+    const canvas = canvasRef.current;
+    const world = worldRef.current;
+    if (!canvas || !world) return;
+
+    const canvasRect = canvas.getBoundingClientRect();
+    const worldRect = world.getBoundingClientRect();
+    const scaleX = canvasRect.width / CANVAS_WIDTH;
+    const scaleY = canvasRect.height / CANVAS_HEIGHT;
+    const offsetX = canvasRect.left - worldRect.left;
+    const offsetY = canvasRect.top - worldRect.top;
+    const myPos = myPosRef.current;
+
+    const nodes = world.querySelectorAll<HTMLElement>("[data-bubble-id]");
+    nodes.forEach((node) => {
+      const id = node.dataset.bubbleId;
+      if (!id) return;
+
+      let x: number;
+      let y: number;
+      let volume: number;
+
+      if (id === "self") {
+        x = myPos.x;
+        y = myPos.y;
+        volume = 1;
+      } else {
+        const player = playersRef.current.get(id);
+        if (!player) {
+          node.style.opacity = "0";
+          return;
+        }
+        x = player.x;
+        y = player.y;
+        volume = proximityVolume(distance(myPos.x, myPos.y, x, y));
+      }
+
+      const left = offsetX + x * scaleX;
+      const top = offsetY + y * scaleY;
+      const scale = 0.55 + volume * 0.55;
+      const opacity = id === "self" ? 1 : volume < 0.02 ? 0 : 0.25 + volume * 0.75;
+
+      node.style.left = `${left}px`;
+      node.style.top = `${top}px`;
+      node.style.opacity = String(opacity);
+      node.style.transform = `translate(-50%, -120%) scale(${scale})`;
+      node.style.pointerEvents = opacity < 0.05 ? "none" : "auto";
+      node.style.zIndex = String(10 + Math.round(volume * 20));
+    });
   }, []);
 
   async function ensureAudio() {
@@ -167,6 +327,9 @@ export default function RoomPage() {
     const ctx = audioContextRef.current;
     if (!ctx) return;
 
+    const audioTracks = remoteStream.getAudioTracks();
+    if (audioTracks.length === 0) return;
+
     const existing = spatialRef.current.get(peerId);
     if (existing) {
       try {
@@ -177,7 +340,8 @@ export default function RoomPage() {
       }
     }
 
-    const source = ctx.createMediaStreamSource(remoteStream);
+    const audioOnly = new MediaStream(audioTracks);
+    const source = ctx.createMediaStreamSource(audioOnly);
     const gain = ctx.createGain();
     const pan = ctx.createStereoPanner();
     gain.gain.value = 0;
@@ -186,6 +350,42 @@ export default function RoomPage() {
     gain.connect(pan);
     pan.connect(ctx.destination);
     spatialRef.current.set(peerId, { gain, pan });
+  }
+
+  function attachRemoteVideo(peerId: string, track: MediaStreamTrack, stream?: MediaStream) {
+    const videoStream = stream?.getVideoTracks().length
+      ? stream
+      : new MediaStream([track]);
+
+    remoteVideoStreamsRef.current.set(peerId, videoStream);
+    const player = playersRef.current.get(peerId);
+    if (player) player.cameraOn = true;
+
+    track.onended = () => {
+      remoteVideoStreamsRef.current.delete(peerId);
+      const p = playersRef.current.get(peerId);
+      if (p) p.cameraOn = false;
+      syncVideoBubbles();
+    };
+
+    syncVideoBubbles();
+  }
+
+  async function renegotiatePeer(peerId: string) {
+    const pc = peersRef.current.get(peerId);
+    if (!pc) return;
+    if (makingOfferRef.current.get(peerId)) return;
+
+    try {
+      makingOfferRef.current.set(peerId, true);
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      socketRef.current?.emit("rtc-offer", { to: peerId, offer });
+    } catch (err) {
+      console.warn("renegotiate failed", peerId, err);
+    } finally {
+      makingOfferRef.current.set(peerId, false);
+    }
   }
 
   async function setupPeerConnection(peerId: string, initiator: boolean) {
@@ -209,9 +409,17 @@ export default function RoomPage() {
       pc.addTrack(track, stream);
     });
 
+    if (localVideoTrackRef.current && localVideoTrackRef.current.readyState === "live") {
+      pc.addTrack(localVideoTrackRef.current, stream);
+    }
+
     pc.ontrack = (event) => {
       const remoteStream = event.streams[0] || new MediaStream([event.track]);
-      attachRemoteAudio(peerId, remoteStream);
+      if (event.track.kind === "audio") {
+        attachRemoteAudio(peerId, remoteStream);
+      } else if (event.track.kind === "video") {
+        attachRemoteVideo(peerId, event.track, remoteStream);
+      }
     };
 
     pc.onicecandidate = (event) => {
@@ -225,25 +433,117 @@ export default function RoomPage() {
         pc.close();
         peersRef.current.delete(peerId);
         spatialRef.current.delete(peerId);
+        remoteVideoStreamsRef.current.delete(peerId);
+        syncVideoBubbles();
       }
     };
 
     if (initiator) {
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      socketRef.current?.emit("rtc-offer", { to: peerId, offer });
+      await renegotiatePeer(peerId);
     }
   }
 
   async function handleOffer(from: string, offer: RTCSessionDescriptionInit) {
-    await setupPeerConnection(from, false);
-    const pc = peersRef.current.get(from);
+    let pc = peersRef.current.get(from);
+    if (!pc) {
+      await setupPeerConnection(from, false);
+      pc = peersRef.current.get(from);
+    }
     if (!pc) return;
+
+    const polite = (socketRef.current?.id || "") > from;
+    const offerCollision =
+      makingOfferRef.current.get(from) || pc.signalingState !== "stable";
+
+    if (offerCollision) {
+      if (!polite) return;
+      try {
+        await pc.setLocalDescription({ type: "rollback" });
+      } catch {
+        /* ignore */
+      }
+    }
+
     await pc.setRemoteDescription(offer);
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     socketRef.current?.emit("rtc-answer", { to: from, answer });
   }
+
+  async function enableCamera() {
+    setCameraError("");
+    try {
+      await ensureAudio();
+      const cam = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: "user",
+          width: { ideal: 320 },
+          height: { ideal: 240 },
+        },
+        audio: false,
+      });
+      const videoTrack = cam.getVideoTracks()[0];
+      if (!videoTrack) throw new Error("No video track");
+
+      localVideoTrackRef.current = videoTrack;
+      localPreviewStreamRef.current = new MediaStream([videoTrack]);
+      streamRef.current?.addTrack(videoTrack);
+
+      for (const [peerId, pc] of peersRef.current.entries()) {
+        const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+        if (sender) {
+          await sender.replaceTrack(videoTrack);
+        } else if (streamRef.current) {
+          pc.addTrack(videoTrack, streamRef.current);
+        }
+        await renegotiatePeer(peerId);
+      }
+
+      setCameraOn(true);
+      cameraOnRef.current = true;
+      socketRef.current?.emit("camera-state", { roomId, cameraOn: true });
+      syncVideoBubbles();
+    } catch (err) {
+      console.warn("Camera access denied:", err);
+      setCameraError("allow camera to show video");
+      setCameraOn(false);
+      cameraOnRef.current = false;
+    }
+  }
+
+  async function disableCamera() {
+    const track = localVideoTrackRef.current;
+    if (track) {
+      track.stop();
+      streamRef.current?.getVideoTracks().forEach((t) => {
+        streamRef.current?.removeTrack(t);
+        t.stop();
+      });
+      localVideoTrackRef.current = null;
+      localPreviewStreamRef.current = null;
+
+      for (const [peerId, pc] of peersRef.current.entries()) {
+        const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+        if (sender) {
+          await sender.replaceTrack(null);
+        }
+        await renegotiatePeer(peerId);
+      }
+    }
+
+    setCameraOn(false);
+    cameraOnRef.current = false;
+    socketRef.current?.emit("camera-state", { roomId, cameraOn: false });
+    syncVideoBubbles();
+  }
+
+  const toggleCamera = useCallback(async () => {
+    if (cameraOnRef.current) {
+      await disableCamera();
+    } else {
+      await enableCamera();
+    }
+  }, [roomId]);
 
   useEffect(() => {
     const socket = io(SERVER_URL, {
@@ -268,12 +568,12 @@ export default function RoomPage() {
         if (p.id === socket.id) {
           myPosRef.current = { x: p.x, y: p.y };
         } else {
-          playersRef.current.set(p.id, p);
+          playersRef.current.set(p.id, { ...p, cameraOn: !!p.cameraOn });
         }
       }
       setPlayerCount(players.length);
+      syncVideoBubbles();
 
-      // New joiner initiates WebRTC to everyone already here
       for (const p of players) {
         if (p.id !== socket.id) {
           await setupPeerConnection(p.id, true);
@@ -282,9 +582,8 @@ export default function RoomPage() {
     });
 
     socket.on("player-joined", (player: Player) => {
-      playersRef.current.set(player.id, player);
+      playersRef.current.set(player.id, { ...player, cameraOn: !!player.cameraOn });
       setPlayerCount(playersRef.current.size + 1);
-      // Wait for their offer (they initiate from room-state)
     });
 
     socket.on("player-moved", ({ id, x, y }: { id: string; x: number; y: number }) => {
@@ -298,6 +597,15 @@ export default function RoomPage() {
     socket.on("player-aura", ({ id, intensity }: { id: string; intensity: number }) => {
       const player = playersRef.current.get(id);
       if (player) player.auraIntensity = intensity;
+    });
+
+    socket.on("player-camera", ({ id, cameraOn: on }: { id: string; cameraOn: boolean }) => {
+      const player = playersRef.current.get(id);
+      if (player) player.cameraOn = on;
+      if (!on) {
+        remoteVideoStreamsRef.current.delete(id);
+      }
+      syncVideoBubbles();
     });
 
     socket.on("player-left", (id: string) => {
@@ -317,6 +625,8 @@ export default function RoomPage() {
         pc.close();
         peersRef.current.delete(id);
       }
+      remoteVideoStreamsRef.current.delete(id);
+      syncVideoBubbles();
       setPlayerCount(playersRef.current.size + 1);
     });
 
@@ -326,7 +636,13 @@ export default function RoomPage() {
 
     socket.on("rtc-answer", async ({ from, answer }: { from: string; answer: RTCSessionDescriptionInit }) => {
       const pc = peersRef.current.get(from);
-      if (pc) await pc.setRemoteDescription(answer);
+      if (pc) {
+        try {
+          await pc.setRemoteDescription(answer);
+        } catch {
+          /* ignore glare */
+        }
+      }
     });
 
     socket.on("rtc-ice", async ({ from, candidate }: { from: string; candidate: RTCIceCandidateInit }) => {
@@ -347,6 +663,10 @@ export default function RoomPage() {
       for (const pc of peersRef.current.values()) pc.close();
       peersRef.current.clear();
       spatialRef.current.clear();
+      remoteVideoStreamsRef.current.clear();
+      localVideoTrackRef.current?.stop();
+      localVideoTrackRef.current = null;
+      localPreviewStreamRef.current = null;
       streamRef.current?.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
       if (audioContextRef.current) {
@@ -354,6 +674,7 @@ export default function RoomPage() {
         audioContextRef.current = null;
       }
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId, name, color, userId]);
 
   const emitMove = useCallback(
@@ -403,16 +724,19 @@ export default function RoomPage() {
     [canvasPoint, emitMove]
   );
 
-  const onPointerUp = useCallback((e: ReactPointerEvent<HTMLCanvasElement>) => {
-    if (!draggingRef.current) return;
-    draggingRef.current = false;
-    emitMove(true);
-    try {
-      e.currentTarget.releasePointerCapture(e.pointerId);
-    } catch {
-      /* already released */
-    }
-  }, [emitMove]);
+  const onPointerUp = useCallback(
+    (e: ReactPointerEvent<HTMLCanvasElement>) => {
+      if (!draggingRef.current) return;
+      draggingRef.current = false;
+      emitMove(true);
+      try {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      } catch {
+        /* already released */
+      }
+    },
+    [emitMove]
+  );
 
   // Game loop
   useEffect(() => {
@@ -430,7 +754,6 @@ export default function RoomPage() {
       const pos = myPosRef.current;
       let moved = false;
 
-      // Keyboard only when not dragging
       if (!draggingRef.current) {
         if (keys.has("w") || keys.has("arrowup")) {
           pos.y = Math.max(AVATAR_RADIUS, pos.y - MOVE_SPEED);
@@ -452,7 +775,6 @@ export default function RoomPage() {
 
       if (moved) emitMove();
 
-      // Lerp remote players
       for (const player of playersRef.current.values()) {
         if (player.targetX !== undefined) {
           player.x += (player.targetX - player.x) * 0.15;
@@ -462,6 +784,7 @@ export default function RoomPage() {
 
       updateSpatialAudio();
       draw();
+      updateBubblePositions();
       animFrameRef.current = requestAnimationFrame(gameLoop);
     };
 
@@ -472,7 +795,7 @@ export default function RoomPage() {
       window.removeEventListener("keyup", handleKeyUp);
       cancelAnimationFrame(animFrameRef.current);
     };
-  }, [emitMove, updateSpatialAudio]);
+  }, [emitMove, updateSpatialAudio, updateBubblePositions]);
 
   function draw() {
     const canvas = canvasRef.current;
@@ -481,7 +804,6 @@ export default function RoomPage() {
     const isDark = themeRef.current === "dark";
     ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
 
-    // Soft pastel wash
     const wash = ctx.createLinearGradient(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
     if (isDark) {
       wash.addColorStop(0, "rgba(90, 58, 85, 0.35)");
@@ -495,16 +817,20 @@ export default function RoomPage() {
     ctx.fillStyle = wash;
     ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
 
-    // Grid
     ctx.strokeStyle = isDark ? "rgba(243, 238, 248, 0.06)" : "rgba(61, 53, 80, 0.08)";
     for (let x = 0; x < CANVAS_WIDTH; x += 40) {
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, CANVAS_HEIGHT); ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, CANVAS_HEIGHT);
+      ctx.stroke();
     }
     for (let y = 0; y < CANVAS_HEIGHT; y += 40) {
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(CANVAS_WIDTH, y); ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(CANVAS_WIDTH, y);
+      ctx.stroke();
     }
 
-    // Hearing range — loud near center, silent at the edge
     const myPos = myPosRef.current;
     const hearFill = ctx.createRadialGradient(
       myPos.x,
@@ -534,14 +860,25 @@ export default function RoomPage() {
     ctx.stroke();
     ctx.setLineDash([]);
 
-    // Draw other players
     for (const player of playersRef.current.values()) {
       const dist = distance(myPos.x, myPos.y, player.x, player.y);
       drawPlayer(ctx, player, isDark, proximityVolume(dist));
     }
 
-    // Draw self
-    drawPlayer(ctx, { id: "self", name, x: myPos.x, y: myPos.y, color, auraIntensity: 0 }, isDark, 1);
+    drawPlayer(
+      ctx,
+      {
+        id: "self",
+        name,
+        x: myPos.x,
+        y: myPos.y,
+        color,
+        auraIntensity: 0,
+        cameraOn: cameraOnRef.current,
+      },
+      isDark,
+      1
+    );
   }
 
   function drawPlayer(
@@ -553,7 +890,6 @@ export default function RoomPage() {
     const { x, y, color: pColor, name: pName } = player;
     const inRange = player.id === "self" || hearVolume > 0.01;
 
-    // Aura glow — brighter when louder / closer
     const glowRadius = AVATAR_RADIUS + 10 + hearVolume * 40;
     const gradient = ctx.createRadialGradient(x, y, AVATAR_RADIUS, x, y, glowRadius);
     gradient.addColorStop(0, pColor + (inRange ? "88" : "44"));
@@ -563,7 +899,6 @@ export default function RoomPage() {
     ctx.fillStyle = gradient;
     ctx.fill();
 
-    // Avatar circle
     ctx.beginPath();
     ctx.arc(x, y, AVATAR_RADIUS, 0, Math.PI * 2);
     ctx.fillStyle = pColor;
@@ -574,7 +909,16 @@ export default function RoomPage() {
     ctx.lineWidth = 2.5;
     ctx.stroke();
 
-    // Name + volume cue
+    if (player.cameraOn) {
+      ctx.beginPath();
+      ctx.arc(x + AVATAR_RADIUS * 0.55, y - AVATAR_RADIUS * 0.55, 5, 0, Math.PI * 2);
+      ctx.fillStyle = "#7dcea0";
+      ctx.fill();
+      ctx.strokeStyle = isDark ? "#1a1525" : "#fff";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+
     ctx.fillStyle = isDark ? "#f3eef8" : "#3d3550";
     ctx.font = "600 12px system-ui, sans-serif";
     ctx.textAlign = "center";
@@ -606,9 +950,21 @@ export default function RoomPage() {
         >
           {muted ? "unmute mic" : "mute mic"}
         </button>
+        <button
+          type="button"
+          onClick={() => void toggleCamera()}
+          className={`chip ${cameraOn ? "chip-camera-on" : ""}`}
+        >
+          {cameraOn ? "stop camera" : "camera"}
+        </button>
         {!micReady && (
           <span className="chip" style={{ opacity: 0.7 }}>
             allow mic to hear
+          </span>
+        )}
+        {cameraError && (
+          <span className="chip chip-danger" style={{ opacity: 0.9 }}>
+            {cameraError}
           </span>
         )}
         <button
@@ -624,17 +980,22 @@ export default function RoomPage() {
       </div>
 
       <div className="flex flex-col lg:flex-row gap-4 items-center lg:items-start z-[1] w-full max-w-[1400px] justify-center">
-        <canvas
-          ref={canvasRef}
-          width={CANVAS_WIDTH}
-          height={CANVAS_HEIGHT}
-          className="room-canvas"
-          style={{ touchAction: "none", cursor: "grab" }}
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
-          onPointerCancel={onPointerUp}
-        />
+        <div className="room-world" ref={worldRef}>
+          <canvas
+            ref={canvasRef}
+            width={CANVAS_WIDTH}
+            height={CANVAS_HEIGHT}
+            className="room-canvas"
+            style={{ touchAction: "none", cursor: "grab" }}
+            onPointerDown={onPointerDown}
+            onPointerMove={onPointerMove}
+            onPointerUp={onPointerUp}
+            onPointerCancel={onPointerUp}
+          />
+          {videoBubbles.map((bubble) => (
+            <VideoBubbleEl key={bubble.id} bubble={bubble} videoRef={() => undefined} />
+          ))}
+        </div>
 
         <aside
           className="glass-card"
@@ -655,9 +1016,7 @@ export default function RoomPage() {
                   className="w-3 h-3 rounded-full"
                   style={{ background: m.color, opacity: m.isOnline ? 1 : 0.35 }}
                 />
-                <span style={{ color: "var(--text)", fontSize: "0.9rem" }}>
-                  {m.displayName}
-                </span>
+                <span style={{ color: "var(--text)", fontSize: "0.9rem" }}>{m.displayName}</span>
                 <span style={{ color: "var(--text-soft)", fontSize: "0.75rem", marginLeft: "auto" }}>
                   {m.isOnline ? "online" : "away"}
                 </span>
@@ -668,7 +1027,7 @@ export default function RoomPage() {
       </div>
 
       <p className="room-hint">
-        drag or WASD to move · pink/blue circle = hearing range · closer = louder
+        drag or WASD · camera pops up on your dot · closer = louder video &amp; audio
       </p>
     </div>
   );

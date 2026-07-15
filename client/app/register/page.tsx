@@ -64,7 +64,7 @@ export default function RegisterPage() {
           <input
             className="field"
             type="text"
-            placeholder="username (letters, numbers, _)"
+            placeholder="username — unique, for friends (@handle)"
             value={username}
             onChange={(e) => setUsername(e.target.value)}
             required
@@ -75,7 +75,7 @@ export default function RegisterPage() {
           <input
             className="field"
             type="text"
-            placeholder="display name"
+            placeholder="display name — can match others"
             value={name}
             onChange={(e) => setName(e.target.value)}
             required
@@ -83,7 +83,7 @@ export default function RegisterPage() {
           <input
             className="field"
             type="email"
-            placeholder="email"
+            placeholder="email — unique, for sign-in"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             required

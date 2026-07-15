@@ -20,9 +20,9 @@ datasource db {
 
 model User {
   id            String    @id @default(cuid())
-  username      String?   @unique
-  name          String?
-  email         String?   @unique
+  username      String?   @unique // globally unique — used for friends / @handle
+  name          String?   // display name — not unique; many users can share it
+  email         String?   @unique // globally unique — used for sign-in
   emailVerified DateTime?
   image         String?
   passwordHash  String?

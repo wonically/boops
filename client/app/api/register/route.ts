@@ -2,7 +2,11 @@ import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
-import { parseUsername } from "@/lib/username";
+import {
+  normalizeEmail,
+  parseDisplayName,
+  validateNewUsername,
+} from "@/lib/user-identity";
 
 const schema = z.object({
   name: z.string().min(1).max(40),
@@ -19,32 +23,30 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Invalid input" }, { status: 400 });
     }
 
-    const usernameResult = parseUsername(parsed.data.username);
-    if (!usernameResult.success) {
-      return NextResponse.json(
-        { error: usernameResult.error.issues[0]?.message || "Invalid username" },
-        { status: 400 }
-      );
+    const email = normalizeEmail(parsed.data.email);
+    const displayName = parseDisplayName(parsed.data.name);
+    if (!displayName.ok) {
+      return NextResponse.json({ error: displayName.error }, { status: 400 });
+    }
+    if (!displayName.value) {
+      return NextResponse.json({ error: "Display name is required" }, { status: 400 });
     }
 
-    const email = parsed.data.email.toLowerCase();
-    const username = usernameResult.data;
+    const usernameCheck = await validateNewUsername(parsed.data.username, { email });
+    if (!usernameCheck.ok) {
+      return NextResponse.json({ error: usernameCheck.error }, { status: 409 });
+    }
 
     const existingEmail = await prisma.user.findUnique({ where: { email } });
     if (existingEmail) {
       return NextResponse.json({ error: "Email already registered" }, { status: 409 });
     }
 
-    const existingUsername = await prisma.user.findUnique({ where: { username } });
-    if (existingUsername) {
-      return NextResponse.json({ error: "Username already taken" }, { status: 409 });
-    }
-
     const passwordHash = await bcrypt.hash(parsed.data.password, 10);
     const user = await prisma.user.create({
       data: {
-        name: parsed.data.name.trim(),
-        username,
+        name: displayName.value,
+        username: usernameCheck.username,
         email,
         passwordHash,
       },

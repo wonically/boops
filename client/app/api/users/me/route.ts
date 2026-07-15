@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
-import { parseUsername } from "@/lib/username";
+import { parseDisplayName, validateNewUsername } from "@/lib/user-identity";
 
 export async function GET() {
   const session = await auth();
@@ -43,31 +43,33 @@ export async function PATCH(req: Request) {
     return NextResponse.json({ error: "Nothing to update" }, { status: 400 });
   }
 
+  const current = await prisma.user.findUnique({
+    where: { id: session.user.id },
+    select: { email: true },
+  });
+  if (!current) {
+    return NextResponse.json({ error: "User not found" }, { status: 404 });
+  }
+
   const data: { username?: string; name?: string | null } = {};
 
   if (parsed.data.username !== undefined) {
-    const usernameResult = parseUsername(parsed.data.username);
-    if (!usernameResult.success) {
-      return NextResponse.json(
-        { error: usernameResult.error.issues[0]?.message || "Invalid username" },
-        { status: 400 }
-      );
-    }
-
-    const username = usernameResult.data;
-    const taken = await prisma.user.findFirst({
-      where: { username, NOT: { id: session.user.id } },
-      select: { id: true },
+    const usernameCheck = await validateNewUsername(parsed.data.username, {
+      email: current.email,
+      excludeUserId: session.user.id,
     });
-    if (taken) {
-      return NextResponse.json({ error: "Username already taken" }, { status: 409 });
+    if (!usernameCheck.ok) {
+      return NextResponse.json({ error: usernameCheck.error }, { status: 409 });
     }
-    data.username = username;
+    data.username = usernameCheck.username;
   }
 
   if (parsed.data.name !== undefined) {
-    const trimmed = parsed.data.name.trim();
-    data.name = trimmed.length > 0 ? trimmed : null;
+    const displayName = parseDisplayName(parsed.data.name);
+    if (!displayName.ok) {
+      return NextResponse.json({ error: displayName.error }, { status: 400 });
+    }
+    data.name = displayName.value;
   }
 
   const user = await prisma.user.update({

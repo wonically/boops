@@ -300,10 +300,63 @@ body {
   z-index: 1;
   touch-action: none;
   cursor: grab;
+  display: block;
 }
 
 .room-canvas:active {
   cursor: grabbing;
+}
+
+.room-world {
+  position: relative;
+  width: 100%;
+  max-width: 1200px;
+  z-index: 1;
+}
+
+.video-bubble {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 88px;
+  height: 88px;
+  border-radius: 50%;
+  overflow: hidden;
+  border: 3px solid #b8d4f8;
+  box-shadow: 0 10px 28px rgba(80, 60, 100, 0.28);
+  background: var(--surface-strong);
+  transition: opacity 0.12s ease;
+  will-change: left, top, transform, opacity;
+  pointer-events: none;
+}
+
+.video-bubble-media {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  background: #2a2438;
+}
+
+.video-bubble-name {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 0.15rem 0.25rem 0.3rem;
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-align: center;
+  color: #fff;
+  background: linear-gradient(transparent, rgba(30, 20, 40, 0.75));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chip-camera-on {
+  background: color-mix(in srgb, #8ad4b8 55%, transparent);
+  border-color: color-mix(in srgb, #5ab890 45%, transparent);
 }
 
 .room-hint {
