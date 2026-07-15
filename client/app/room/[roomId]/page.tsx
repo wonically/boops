@@ -6,7 +6,7 @@ import { io, Socket } from "socket.io-client";
 import { useTheme } from "@/lib/theme";
 
 const SERVER_URL = process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:3001";
-const SPATIAL_RADIUS = 300;
+const SPATIAL_RADIUS = 280;
 const CANVAS_WIDTH = 1200;
 const CANVAS_HEIGHT = 800;
 const AVATAR_RADIUS = 20;
@@ -21,6 +21,26 @@ interface Player {
   auraIntensity: number;
   targetX?: number;
   targetY?: number;
+}
+
+type SpatialChain = {
+  gain: GainNode;
+  pan: StereoPannerNode;
+};
+
+function distance(x1: number, y1: number, x2: number, y2: number) {
+  return Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
+}
+
+/** 1 when overlapping, 0 at/ beyond hearing range. Squared falloff = much louder up close. */
+function proximityVolume(dist: number) {
+  if (dist >= SPATIAL_RADIUS) return 0;
+  const t = 1 - dist / SPATIAL_RADIUS;
+  return t * t;
+}
+
+function proximityPan(myX: number, theirX: number) {
+  return Math.max(-1, Math.min(1, (theirX - myX) / SPATIAL_RADIUS));
 }
 
 export default function RoomPage() {
@@ -41,11 +61,13 @@ export default function RoomPage() {
   const lastEmitRef = useRef(0);
   const animFrameRef = useRef<number>(0);
   const audioContextRef = useRef<AudioContext | null>(null);
-  const gainNodesRef = useRef<Map<string, GainNode>>(new Map());
+  const spatialRef = useRef<Map<string, SpatialChain>>(new Map());
   const streamRef = useRef<MediaStream | null>(null);
   const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
+  const mutedRef = useRef(false);
   const themeRef = useRef(theme);
   const [muted, setMuted] = useState(false);
+  const [micReady, setMicReady] = useState(false);
   const [connected, setConnected] = useState(false);
   const [playerCount, setPlayerCount] = useState(0);
   const [memberList, setMemberList] = useState<
@@ -55,6 +77,13 @@ export default function RoomPage() {
   useEffect(() => {
     themeRef.current = theme;
   }, [theme]);
+
+  useEffect(() => {
+    mutedRef.current = muted;
+    streamRef.current?.getAudioTracks().forEach((track) => {
+      track.enabled = !muted;
+    });
+  }, [muted]);
 
   useEffect(() => {
     let cancelled = false;
@@ -87,22 +116,139 @@ export default function RoomPage() {
     };
   }, [roomId]);
 
-  const getDistance = (x1: number, y1: number, x2: number, y2: number) =>
-    Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
-
   const updateSpatialAudio = useCallback(() => {
+    const ctx = audioContextRef.current;
+    if (!ctx) return;
+    if (ctx.state === "suspended") {
+      void ctx.resume();
+    }
+
     const myPos = myPosRef.current;
-    for (const [peerId, gainNode] of gainNodesRef.current.entries()) {
+    for (const [peerId, chain] of spatialRef.current.entries()) {
       const player = playersRef.current.get(peerId);
-      if (!player) continue;
-      const dist = getDistance(myPos.x, myPos.y, player.x, player.y);
-      const volume = Math.max(0, 1 - dist / SPATIAL_RADIUS);
-      gainNode.gain.setTargetAtTime(volume, audioContextRef.current!.currentTime, 0.1);
+      if (!player) {
+        chain.gain.gain.setTargetAtTime(0, ctx.currentTime, 0.05);
+        continue;
+      }
+      const dist = distance(myPos.x, myPos.y, player.x, player.y);
+      const volume = proximityVolume(dist);
+      const pan = proximityPan(myPos.x, player.x);
+      chain.gain.gain.setTargetAtTime(volume, ctx.currentTime, 0.08);
+      chain.pan.pan.setTargetAtTime(pan, ctx.currentTime, 0.08);
+      player.auraIntensity = volume;
     }
   }, []);
 
+  async function ensureAudio() {
+    if (!audioContextRef.current) {
+      audioContextRef.current = new AudioContext();
+    }
+    if (audioContextRef.current.state === "suspended") {
+      await audioContextRef.current.resume();
+    }
+    if (!streamRef.current) {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+      streamRef.current = stream;
+      stream.getAudioTracks().forEach((track) => {
+        track.enabled = !mutedRef.current;
+      });
+      setMicReady(true);
+    }
+    return { ctx: audioContextRef.current, stream: streamRef.current };
+  }
+
+  function attachRemoteAudio(peerId: string, remoteStream: MediaStream) {
+    const ctx = audioContextRef.current;
+    if (!ctx) return;
+
+    const existing = spatialRef.current.get(peerId);
+    if (existing) {
+      try {
+        existing.gain.disconnect();
+        existing.pan.disconnect();
+      } catch {
+        /* already disconnected */
+      }
+    }
+
+    const source = ctx.createMediaStreamSource(remoteStream);
+    const gain = ctx.createGain();
+    const pan = ctx.createStereoPanner();
+    gain.gain.value = 0;
+    pan.pan.value = 0;
+    source.connect(gain);
+    gain.connect(pan);
+    pan.connect(ctx.destination);
+    spatialRef.current.set(peerId, { gain, pan });
+  }
+
+  async function setupPeerConnection(peerId: string, initiator: boolean) {
+    if (peersRef.current.has(peerId)) return;
+
+    let stream: MediaStream;
+    try {
+      ({ stream } = await ensureAudio());
+    } catch (err) {
+      console.warn("Mic access denied:", err);
+      setMicReady(false);
+      return;
+    }
+
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+    });
+    peersRef.current.set(peerId, pc);
+
+    stream.getTracks().forEach((track) => {
+      pc.addTrack(track, stream);
+    });
+
+    pc.ontrack = (event) => {
+      const remoteStream = event.streams[0] || new MediaStream([event.track]);
+      attachRemoteAudio(peerId, remoteStream);
+    };
+
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        socketRef.current?.emit("rtc-ice", { to: peerId, candidate: event.candidate });
+      }
+    };
+
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+        pc.close();
+        peersRef.current.delete(peerId);
+        spatialRef.current.delete(peerId);
+      }
+    };
+
+    if (initiator) {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      socketRef.current?.emit("rtc-offer", { to: peerId, offer });
+    }
+  }
+
+  async function handleOffer(from: string, offer: RTCSessionDescriptionInit) {
+    await setupPeerConnection(from, false);
+    const pc = peersRef.current.get(from);
+    if (!pc) return;
+    await pc.setRemoteDescription(offer);
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    socketRef.current?.emit("rtc-answer", { to: from, answer });
+  }
+
   useEffect(() => {
-    const socket = io(SERVER_URL);
+    const socket = io(SERVER_URL, {
+      transports: ["websocket", "polling"],
+    });
     socketRef.current = socket;
 
     socket.on("connect", () => {
@@ -110,12 +256,14 @@ export default function RoomPage() {
       socket.emit("join-room", { roomId, name, color, userId });
     });
 
+    socket.on("disconnect", () => setConnected(false));
+
     socket.on("join-error", ({ error }: { error: string }) => {
       alert(error);
       window.location.href = "/dashboard";
     });
 
-    socket.on("room-state", (players: Player[]) => {
+    socket.on("room-state", async (players: Player[]) => {
       for (const p of players) {
         if (p.id === socket.id) {
           myPosRef.current = { x: p.x, y: p.y };
@@ -124,12 +272,19 @@ export default function RoomPage() {
         }
       }
       setPlayerCount(players.length);
+
+      // New joiner initiates WebRTC to everyone already here
+      for (const p of players) {
+        if (p.id !== socket.id) {
+          await setupPeerConnection(p.id, true);
+        }
+      }
     });
 
     socket.on("player-joined", (player: Player) => {
       playersRef.current.set(player.id, player);
       setPlayerCount(playersRef.current.size + 1);
-      setupPeerConnection(player.id, true);
+      // Wait for their offer (they initiate from room-state)
     });
 
     socket.on("player-moved", ({ id, x, y }: { id: string; x: number; y: number }) => {
@@ -147,9 +302,21 @@ export default function RoomPage() {
 
     socket.on("player-left", (id: string) => {
       playersRef.current.delete(id);
-      gainNodesRef.current.delete(id);
+      const chain = spatialRef.current.get(id);
+      if (chain) {
+        try {
+          chain.gain.disconnect();
+          chain.pan.disconnect();
+        } catch {
+          /* ignore */
+        }
+        spatialRef.current.delete(id);
+      }
       const pc = peersRef.current.get(id);
-      if (pc) { pc.close(); peersRef.current.delete(id); }
+      if (pc) {
+        pc.close();
+        peersRef.current.delete(id);
+      }
       setPlayerCount(playersRef.current.size + 1);
     });
 
@@ -164,71 +331,30 @@ export default function RoomPage() {
 
     socket.on("rtc-ice", async ({ from, candidate }: { from: string; candidate: RTCIceCandidateInit }) => {
       const pc = peersRef.current.get(from);
-      if (pc) await pc.addIceCandidate(candidate);
+      if (pc && candidate) {
+        try {
+          await pc.addIceCandidate(candidate);
+        } catch {
+          /* ignore late candidates */
+        }
+      }
     });
 
-    initAudio();
+    void ensureAudio().catch((err) => console.warn("Mic access denied:", err));
 
     return () => {
       socket.disconnect();
       for (const pc of peersRef.current.values()) pc.close();
-      if (audioContextRef.current) audioContextRef.current.close();
-    };
-  }, [roomId, name, color, userId]);
-
-  async function initAudio() {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      streamRef.current = stream;
-      audioContextRef.current = new AudioContext();
-    } catch (err) {
-      console.warn("Mic access denied:", err);
-    }
-  }
-
-  async function setupPeerConnection(peerId: string, initiator: boolean) {
-    if (!streamRef.current || !audioContextRef.current) return;
-
-    const pc = new RTCPeerConnection({
-      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-    });
-    peersRef.current.set(peerId, pc);
-
-    streamRef.current.getTracks().forEach((track) => {
-      pc.addTrack(track, streamRef.current!);
-    });
-
-    pc.ontrack = (event) => {
-      const remoteStream = event.streams[0];
-      const source = audioContextRef.current!.createMediaStreamSource(remoteStream);
-      const gainNode = audioContextRef.current!.createGain();
-      gainNode.gain.value = 0;
-      source.connect(gainNode);
-      gainNode.connect(audioContextRef.current!.destination);
-      gainNodesRef.current.set(peerId, gainNode);
-    };
-
-    pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        socketRef.current?.emit("rtc-ice", { to: peerId, candidate: event.candidate });
+      peersRef.current.clear();
+      spatialRef.current.clear();
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+      if (audioContextRef.current) {
+        void audioContextRef.current.close();
+        audioContextRef.current = null;
       }
     };
-
-    if (initiator) {
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      socketRef.current?.emit("rtc-offer", { to: peerId, offer });
-    }
-  }
-
-  async function handleOffer(from: string, offer: RTCSessionDescriptionInit) {
-    await setupPeerConnection(from, false);
-    const pc = peersRef.current.get(from)!;
-    await pc.setRemoteDescription(offer);
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-    socketRef.current?.emit("rtc-answer", { to: from, answer });
-  }
+  }, [roomId, name, color, userId]);
 
   const emitMove = useCallback(
     (force = false) => {
@@ -255,6 +381,7 @@ export default function RoomPage() {
 
   const onPointerDown = useCallback(
     (e: ReactPointerEvent<HTMLCanvasElement>) => {
+      void ensureAudio().catch(() => undefined);
       const point = canvasPoint(e.clientX, e.clientY);
       if (!point) return;
       draggingRef.current = true;
@@ -377,31 +504,59 @@ export default function RoomPage() {
       ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(CANVAS_WIDTH, y); ctx.stroke();
     }
 
-    // Draw spatial radius indicator for self
+    // Hearing range — loud near center, silent at the edge
     const myPos = myPosRef.current;
+    const hearFill = ctx.createRadialGradient(
+      myPos.x,
+      myPos.y,
+      AVATAR_RADIUS,
+      myPos.x,
+      myPos.y,
+      SPATIAL_RADIUS
+    );
+    if (isDark) {
+      hearFill.addColorStop(0, "rgba(184, 212, 248, 0.22)");
+      hearFill.addColorStop(0.55, "rgba(184, 212, 248, 0.08)");
+      hearFill.addColorStop(1, "rgba(184, 212, 248, 0)");
+    } else {
+      hearFill.addColorStop(0, "rgba(245, 163, 192, 0.28)");
+      hearFill.addColorStop(0.55, "rgba(245, 163, 192, 0.1)");
+      hearFill.addColorStop(1, "rgba(245, 163, 192, 0)");
+    }
     ctx.beginPath();
     ctx.arc(myPos.x, myPos.y, SPATIAL_RADIUS, 0, Math.PI * 2);
-    ctx.strokeStyle = isDark ? "rgba(184, 212, 248, 0.2)" : "rgba(245, 163, 192, 0.35)";
+    ctx.fillStyle = hearFill;
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(myPos.x, myPos.y, SPATIAL_RADIUS, 0, Math.PI * 2);
+    ctx.strokeStyle = isDark ? "rgba(184, 212, 248, 0.28)" : "rgba(245, 163, 192, 0.4)";
     ctx.setLineDash([8, 8]);
     ctx.stroke();
     ctx.setLineDash([]);
 
     // Draw other players
     for (const player of playersRef.current.values()) {
-      drawPlayer(ctx, player, isDark);
+      const dist = distance(myPos.x, myPos.y, player.x, player.y);
+      drawPlayer(ctx, player, isDark, proximityVolume(dist));
     }
 
     // Draw self
-    drawPlayer(ctx, { id: "self", name, x: myPos.x, y: myPos.y, color, auraIntensity: 0 }, isDark);
+    drawPlayer(ctx, { id: "self", name, x: myPos.x, y: myPos.y, color, auraIntensity: 0 }, isDark, 1);
   }
 
-  function drawPlayer(ctx: CanvasRenderingContext2D, player: Player, isDark: boolean) {
-    const { x, y, color: pColor, name: pName, auraIntensity } = player;
+  function drawPlayer(
+    ctx: CanvasRenderingContext2D,
+    player: Player,
+    isDark: boolean,
+    hearVolume: number
+  ) {
+    const { x, y, color: pColor, name: pName } = player;
+    const inRange = player.id === "self" || hearVolume > 0.01;
 
-    // Aura glow
-    const glowRadius = AVATAR_RADIUS + 10 + auraIntensity * 30;
+    // Aura glow — brighter when louder / closer
+    const glowRadius = AVATAR_RADIUS + 10 + hearVolume * 40;
     const gradient = ctx.createRadialGradient(x, y, AVATAR_RADIUS, x, y, glowRadius);
-    gradient.addColorStop(0, pColor + "66");
+    gradient.addColorStop(0, pColor + (inRange ? "88" : "44"));
     gradient.addColorStop(1, pColor + "00");
     ctx.beginPath();
     ctx.arc(x, y, glowRadius, 0, Math.PI * 2);
@@ -412,16 +567,25 @@ export default function RoomPage() {
     ctx.beginPath();
     ctx.arc(x, y, AVATAR_RADIUS, 0, Math.PI * 2);
     ctx.fillStyle = pColor;
+    ctx.globalAlpha = inRange ? 1 : 0.45;
     ctx.fill();
+    ctx.globalAlpha = 1;
     ctx.strokeStyle = isDark ? "rgba(243, 238, 248, 0.45)" : "rgba(255, 255, 255, 0.85)";
     ctx.lineWidth = 2.5;
     ctx.stroke();
 
-    // Name
+    // Name + volume cue
     ctx.fillStyle = isDark ? "#f3eef8" : "#3d3550";
     ctx.font = "600 12px system-ui, sans-serif";
     ctx.textAlign = "center";
     ctx.fillText(pName, x, y + AVATAR_RADIUS + 16);
+
+    if (player.id !== "self" && hearVolume > 0.02) {
+      const pct = Math.round(hearVolume * 100);
+      ctx.fillStyle = isDark ? "rgba(184, 212, 248, 0.85)" : "rgba(90, 110, 150, 0.85)";
+      ctx.font = "500 10px system-ui, sans-serif";
+      ctx.fillText(`${pct}%`, x, y + AVATAR_RADIUS + 28);
+    }
   }
 
   return (
@@ -434,11 +598,19 @@ export default function RoomPage() {
         </span>
         <button
           type="button"
-          onClick={() => setMuted(!muted)}
+          onClick={() => {
+            void ensureAudio().catch(() => undefined);
+            setMuted(!muted);
+          }}
           className={`chip ${muted ? "chip-danger" : ""}`}
         >
-          {muted ? "unmute" : "mute"}
+          {muted ? "unmute mic" : "mute mic"}
         </button>
+        {!micReady && (
+          <span className="chip" style={{ opacity: 0.7 }}>
+            allow mic to hear
+          </span>
+        )}
         <button
           type="button"
           onClick={() => navigator.clipboard.writeText(window.location.href)}
@@ -495,7 +667,9 @@ export default function RoomPage() {
         </aside>
       </div>
 
-      <p className="room-hint">drag on the world or use WASD · get closer to hear others</p>
+      <p className="room-hint">
+        drag or WASD to move · pink/blue circle = hearing range · closer = louder
+      </p>
     </div>
   );
 }
