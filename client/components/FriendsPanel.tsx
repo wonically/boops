@@ -22,7 +22,7 @@ type Props = {
 };
 
 function friendLabel(user: FriendUser) {
-  return user.username ? `@${user.username}` : user.name || "booper";
+  return user.name || (user.username ? `@${user.username}` : "booper");
 }
 
 export function FriendsPanel({ enabled }: Props) {
@@ -161,9 +161,9 @@ export function FriendsPanel({ enabled }: Props) {
                     title={row.user.isOnline ? "online" : "offline"}
                   />
                   <span style={{ color: "var(--text)", fontWeight: 600 }}>{friendLabel(row.user)}</span>
-                  {row.user.name && row.user.username && (
+                  {row.user.username && (
                     <span className="label" style={{ margin: 0 }}>
-                      {row.user.name}
+                      @{row.user.username}
                     </span>
                   )}
                 </div>

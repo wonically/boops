@@ -5,5 +5,5 @@ type NamedUser = {
 };
 
 export function displayName(user: NamedUser, fallback = "booper") {
-  return user.username || user.name || user.email?.split("@")[0] || fallback;
+  return user.name || user.username || user.email?.split("@")[0] || fallback;
 }

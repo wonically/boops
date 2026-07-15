@@ -156,7 +156,7 @@ export default function DashboardPage() {
               {hasUsername && (
                 <>
                   {" "}
-                  · <span style={{ color: "var(--text)", fontWeight: 600 }}>@{username}</span>
+                  · <span style={{ color: "var(--text-soft)" }}>@{username}</span>
                 </>
               )}
             </p>
